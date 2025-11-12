@@ -1,301 +1,4 @@
-# """
-# Maersk E-Commerce GenAI Analyst - Complete Application
-# Run: streamlit run app.py
-# """
 
-# import streamlit as st
-# import pandas as pd
-# import sqlite3
-# import os
-# from datetime import datetime
-# import json
-# import requests
-# from io import StringIO
-# import zipfile
-
-# # LLM Setup
-# import google.generativeai as genai
-
-# # Configure API
-# GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "your-key-here")
-# genai.configure(api_key=GOOGLE_API_KEY)
-
-# # Initialize Streamlit config
-# st.set_page_config(page_title="E-Commerce AI Analyst", layout="wide", initial_sidebar_state="expanded")
-
-# # Styling
-# st.markdown("""
-# <style>
-#     .main { padding: 0rem 1rem; }
-#     .stChatMessage { padding: 1rem; border-radius: 8px; }
-#     h1 { color: #1f77b4; }
-# </style>
-# """, unsafe_allow_html=True)
-
-# # ============= DATA LOADING & DATABASE SETUP =============
-
-# DB_PATH = "ecommerce.db"
-
-# @st.cache_resource
-# def init_database():
-#     """Initialize SQLite database with e-commerce data"""
-#     conn = sqlite3.connect(DB_PATH)
-#     cursor = conn.cursor()
-    
-#     # Check if tables exist
-#     cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
-#     if cursor.fetchall():
-#         return conn
-    
-#     st.info("📥 Downloading and loading dataset...")
-    
-#     # Download dataset from Kaggle (simplified - uses static data)
-#     sample_data = {
-#         "orders": pd.DataFrame({
-#             "order_id": range(1, 101),
-#             "customer_id": range(1, 51) * 2,
-#             "order_status": ["delivered", "processing", "cancelled"] * 33 + ["delivered"],
-#             "order_purchase_timestamp": pd.date_range("2024-01-01", periods=100, freq="D"),
-#             "order_delivered_customer_date": pd.date_range("2024-01-05", periods=100, freq="D"),
-#         }),
-#         "order_items": pd.DataFrame({
-#             "order_id": [i//3 + 1 for i in range(297)],
-#             "product_id": list(range(1, 100)) * 3,
-#             "seller_id": list(range(1, 20)) * 15,
-#             "shipping_limit_date": pd.date_range("2024-01-06", periods=297, freq="H"),
-#             "price": [50 + (i % 50) * 10 for i in range(297)],
-#             "freight_value": [5 + (i % 20) for i in range(297)],
-#         }),
-#         "products": pd.DataFrame({
-#             "product_id": range(1, 100),
-#             "product_category_name": ["Electronics", "Fashion", "Home", "Sports"] * 25,
-#             "product_name_lenght": [50 + (i % 100) for i in range(99)],
-#             "product_description_lenght": [100 + (i % 500) for i in range(99)],
-#             "product_photos_qty": [1 + (i % 5) for i in range(99)],
-#             "product_weight_g": [100 + (i % 5000) for i in range(99)],
-#             "product_length_cm": [10 + (i % 50) for i in range(99)],
-#         }),
-#         "customers": pd.DataFrame({
-#             "customer_id": range(1, 51),
-#             "customer_unique_id": [f"cust_{i}" for i in range(1, 51)],
-#             "customer_zip_code_prefix": [10000 + i * 100 for i in range(50)],
-#             "customer_city": ["São Paulo", "Rio de Janeiro", "Belo Horizonte"] * 17,
-#             "customer_state": ["SP", "RJ", "MG"] * 17,
-#         }),
-#         "order_payments": pd.DataFrame({
-#             "order_id": list(range(1, 101)),
-#             "payment_sequential": [1] * 100,
-#             "payment_type": ["credit_card", "debit_card", "boleto"] * 33 + ["credit_card"],
-#             "payment_installments": [1 + (i % 12) for i in range(100)],
-#             "payment_value": [100 + (i % 500) for i in range(100)],
-#         }),
-#     }
-    
-#     # Create tables
-#     for table_name, df in sample_data.items():
-#         df.to_sql(table_name, conn, if_exists='replace', index=False)
-    
-#     conn.commit()
-#     st.success("✅ Database loaded!")
-#     return conn
-
-# @st.cache_resource
-# def get_db_schema():
-#     """Get database schema info"""
-#     conn = init_database()
-#     cursor = conn.cursor()
-#     cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
-#     tables = cursor.fetchall()
-    
-#     schema = {}
-#     for table in tables:
-#         table_name = table[0]
-#         cursor.execute(f"PRAGMA table_info({table_name})")
-#         columns = cursor.fetchall()
-#         schema[table_name] = [(col[1], col[2]) for col in columns]
-    
-#     return schema
-
-# def execute_query(query: str):
-#     """Execute SQL query safely"""
-#     try:
-#         conn = init_database()
-#         df = pd.read_sql_query(query, conn)
-#         return df, None
-#     except Exception as e:
-#         return None, str(e)
-
-# # ============= AI AGENT FUNCTIONS =============
-
-# def generate_sql_from_question(question: str, schema: dict) -> str:
-#     """Use Gemini to convert natural language to SQL"""
-    
-#     schema_str = "\n".join([
-#         f"Table: {table}\n  Columns: {', '.join([f'{col[0]} ({col[1]})' for col in cols])}"
-#         for table, cols in schema.items()
-#     ])
-    
-#     prompt = f"""You are a SQL expert. Convert this natural language question to SQL.
-# Only use these tables and columns:
-# {schema_str}
-
-# Question: {question}
-
-# Rules:
-# - Return ONLY the SQL query, no explanation
-# - Use proper JOINs when needed
-# - Add LIMIT 50 to prevent huge results
-# - Make sure the SQL is valid SQLite syntax
-
-# SQL:"""
-    
-#     try:
-#         model = genai.GenerativeModel('gemini-2.0-flash')
-#         response = model.generate_content(prompt)
-#         sql = response.text.strip()
-#         # Clean up markdown if present
-#         sql = sql.replace("```sql", "").replace("```", "").strip()
-#         return sql
-#     except Exception as e:
-#         st.error(f"API Error: {e}")
-#         return None
-
-# def generate_insight(question: str, data: pd.DataFrame) -> str:
-#     """Generate insights from query results"""
-    
-#     data_summary = data.to_string()[:1000]  # Limit length
-    
-#     prompt = f"""You are a business analyst. Given this data:
-
-# {data_summary}
-
-# For the original question: "{question}"
-
-# Provide 2-3 key business insights in 2-3 sentences. Be specific with numbers."""
-    
-#     try:
-#         model = genai.GenerativeModel('gemini-2.0-flash')
-#         response = model.generate_content(prompt)
-#         return response.text
-#     except Exception as e:
-#         return f"Couldn't generate insight: {e}"
-
-# # ============= STREAMLIT UI =============
-
-# st.title("🎯 E-Commerce AI Analyst")
-# st.markdown("Ask questions about e-commerce operations in natural language")
-
-# # Sidebar
-# with st.sidebar:
-#     st.header("⚙️ Configuration")
-    
-#     if not GOOGLE_API_KEY or GOOGLE_API_KEY == "your-key-here":
-#         api_key = st.text_input("Enter your Google API Key", type="password")
-#         if api_key:
-#             os.environ["GOOGLE_API_KEY"] = api_key
-#             genai.configure(api_key=api_key)
-#             st.success("✅ API Key configured!")
-#     else:
-#         st.success("✅ API Key configured!")
-    
-#     st.markdown("---")
-#     st.subheader("📊 Sample Questions")
-#     sample_queries = [
-#         "Which product category has the highest sales?",
-#         "What is the average order value?",
-#         "Show me sales by city",
-#         "Which sellers have the most orders?",
-#         "What payment methods are most common?",
-#     ]
-    
-#     for query in sample_queries:
-#         if st.button(f"📌 {query}", use_container_width=True):
-#             st.session_state.question = query
-
-# # Main content
-# col1, col2 = st.columns([3, 1])
-
-# with col1:
-#     user_question = st.text_input(
-#         "Ask a question about the data:",
-#         value=st.session_state.get("question", ""),
-#         key="question"
-#     )
-
-# with col2:
-#     analyze_btn = st.button("🔍 Analyze", use_container_width=True)
-
-# # Initialize session state for chat history
-# if "chat_history" not in st.session_state:
-#     st.session_state.chat_history = []
-
-# # Process query
-# if analyze_btn and user_question:
-    
-#     with st.spinner("🤖 Generating SQL..."):
-#         schema = get_db_schema()
-#         sql_query = generate_sql_from_question(user_question, schema)
-    
-#     if sql_query:
-#         st.code(sql_query, language="sql")
-        
-#         with st.spinner("📊 Executing query..."):
-#             df, error = execute_query(sql_query)
-        
-#         if error:
-#             st.error(f"❌ Query Error: {error}")
-#             st.info("💡 Try rephrasing your question or ask about available data")
-#         else:
-#             # Display results
-#             st.markdown("### 📈 Results")
-#             st.dataframe(df, use_container_width=True, height=300)
-            
-#             # Generate insights
-#             with st.spinner("💭 Analyzing insights..."):
-#                 insight = generate_insight(user_question, df)
-            
-#             st.markdown("### 💡 Key Insights")
-#             st.info(insight)
-            
-#             # Add to history
-#             st.session_state.chat_history.append({
-#                 "question": user_question,
-#                 "sql": sql_query,
-#                 "timestamp": datetime.now().isoformat()
-#             })
-            
-#             # Export options
-#             col1, col2, col3 = st.columns(3)
-#             with col1:
-#                 csv = df.to_csv(index=False)
-#                 st.download_button("📥 Download CSV", csv, "results.csv", "text/csv")
-#             with col2:
-#                 st.metric("Records Found", len(df))
-#             with col3:
-#                 st.metric("Columns", len(df.columns))
-
-# # History section
-# if st.session_state.chat_history:
-#     st.markdown("---")
-#     with st.expander("📋 Query History"):
-#         for i, item in enumerate(reversed(st.session_state.chat_history[-5:]), 1):
-#             st.write(f"**Query {i}:** {item['question']}")
-#             st.code(item['sql'], language="sql")
-
-# # Footer
-# st.markdown("---")
-# st.markdown("""
-# **Architecture:**
-# - 🤖 Gemini 2.0 Flash for SQL generation & insights
-# - 🗄️ SQLite for data storage
-# - 📊 Streamlit for UI
-# - 🔄 Multi-turn conversation support
-# """)
-
-"""
-Maersk E-Commerce GenAI Analyst - Using Real Kaggle Dataset
-Run: streamlit run app.py
-"""
 
 import streamlit as st
 import pandas as pd
@@ -306,18 +9,18 @@ import json
 import zipfile
 from pathlib import Path
 
-# LLM Setup
+
 import google.generativeai as genai
 
-# Configure API
+
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "your-key-here")
 if GOOGLE_API_KEY != "your-key-here":
     genai.configure(api_key=GOOGLE_API_KEY)
 
-# Initialize Streamlit config
+
 st.set_page_config(page_title="E-Commerce AI Analyst", layout="wide", initial_sidebar_state="expanded")
 
-# Styling
+
 st.markdown("""
 <style>
     .main { padding: 0rem 1rem; }
@@ -326,7 +29,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ============= DATA LOADING & DATABASE SETUP =============
 
 DB_PATH = "ecommerce.db"
 DATA_FOLDER = "data"
@@ -342,10 +44,8 @@ def download_kaggle_dataset():
         import kaggle
         st.info("📥 Downloading Brazilian e-commerce dataset from Kaggle...")
         
-        # Create data folder
         Path(DATA_FOLDER).mkdir(exist_ok=True)
         
-        # Download dataset
         kaggle.api.dataset_download_files(
             'olistbr/brazilian-ecommerce',
             path=DATA_FOLDER,
@@ -471,8 +171,6 @@ def execute_query(query: str):
     except Exception as e:
         return None, str(e)
 
-# ============= TEMPLATE QUERIES (Fallback) =============
-
 TEMPLATE_QUERIES = {
     "average order value": "SELECT AVG(payment_value) as avg_order_value FROM order_payments LIMIT 100;",
     "highest revenue category": "SELECT p.product_category_name, SUM(oi.price) as total_revenue FROM products p JOIN order_items oi ON p.product_id = oi.product_id GROUP BY p.product_category_name ORDER BY total_revenue DESC LIMIT 10;",
@@ -485,8 +183,8 @@ def generate_sql_from_question(question: str, schema: dict) -> str:
     """Use Gemini to convert natural language to SQL"""
     
     schema_str = "\n".join([
-        f"Table: {table}\n  Columns: {', '.join([f'{col[0]} ({col[1]})' for col in cols[:10]])}"  # Limit columns shown
-        for table, cols in list(schema.items())[:8]  # Limit tables shown
+        f"Table: {table}\n  Columns: {', '.join([f'{col[0]} ({col[1]})' for col in cols[:10]])}"  
+        for table, cols in list(schema.items())[:8] 
     ])
     
     prompt = f"""You are a SQL expert for e-commerce analysis. Convert this natural language question to SQL.
@@ -513,12 +211,11 @@ Output format: Just the raw SQL, nothing else."""
         response = model.generate_content(prompt)
         sql = response.text.strip()
         
-        # Aggressive cleaning
+
         sql = sql.replace("```sql", "").replace("```", "").strip()
         sql = sql.replace("SQLite", "").strip()
         sql = sql.replace("sql", "").strip()
         
-        # Remove common prefixes that might appear
         prefixes = ["ite ", "SELECT", "qlite ", "- SELECT"]
         while any(sql.startswith(p) for p in prefixes if not sql.startswith("SELECT")):
             for prefix in prefixes:
@@ -526,7 +223,6 @@ Output format: Just the raw SQL, nothing else."""
                     sql = sql[len(prefix):].strip()
                     break
         
-        # Ensure it starts with SELECT
         if not sql.upper().startswith("SELECT"):
             st.warning(f"⚠️ Unexpected SQL format. Raw: {sql[:100]}")
             return None
@@ -570,7 +266,7 @@ with st.sidebar:
     
     with st.expander("📋 Setup Instructions", expanded=False):
         st.markdown("""
-### Quick Setup:
+
 
 **1. Get Kaggle API Key:**
 - Go to: https://www.kaggle.com/account
